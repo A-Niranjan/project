@@ -2,22 +2,41 @@ from mcp.server.fastmcp import FastMCP
 import json
 import os
 import subprocess
-from typing import List
+from typing import List, Dict, Any
 
 # Initialize the MCP server
 mcp = FastMCP("Media Manipulation Server")
 MEDIA_DIR = "E:/project"
 
-# Valid extensions for video and audio files
+# Valid extensions for video, audio, and image files
 VIDEO_EXTENSIONS = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm']
 AUDIO_EXTENSIONS = ['.aac', '.mp3', '.wav', '.ogg', '.flac', '.m4a']
+IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.bmp', '.gif']
+
+# Position mappings for overlay tool
+POSITION_MAP = {
+    "top-left": "10:10",
+    "top-right": "main_w-overlay_w-10:10",
+    "bottom-left": "10:main_h-overlay_h-10",
+    "bottom-right": "main_w-overlay_w-10:main_h-overlay_h-10",
+    "center": "(main_w-overlay_w)/2:(main_h-overlay_h)/2"
+}
+
+# Required parameters for each transformation type
+TRANSFORM_PARAMS = {
+    "crop": ["x", "y", "width", "height"],
+    "scale": ["width", "height"],
+    "rotate": ["angle"],
+    "flip": ["direction"],
+    "transpose": ["dir"]
+}
 
 # Resource to list available media files
 @mcp.resource("directory://media")
 def get_media_files() -> str:
     """Returns a JSON list of media files in the E:/project directory."""
     files = os.listdir(MEDIA_DIR)
-    media_files = [f for f in files if f.lower().endswith(tuple(VIDEO_EXTENSIONS + AUDIO_EXTENSIONS))]
+    media_files = [f for f in files if f.lower().endswith(tuple(VIDEO_EXTENSIONS + AUDIO_EXTENSIONS + IMAGE_EXTENSIONS))]
     return json.dumps(media_files)
 
 # Resource to get metadata for a specific file
@@ -227,6 +246,214 @@ def extract_audio(video_file: str, output_audio_file: str) -> str:
         return f"Successfully extracted audio to {output_audio_file}"
     except subprocess.CalledProcessError as e:
         return f"Error extracting audio: {e.stderr.decode()}"
+
+# Tool: Convert image sequence to video
+@mcp.tool()
+def images_to_video(input_pattern: str, frame_rate: float, output_file: str) -> str:
+    """Converts a sequence of images into a video using FFmpeg."""
+    if not frame_rate > 0:
+        return "Error: frame_rate must be positive"
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+    if os.path.sep in output_file:
+        return "Error: Output file name cannot contain directory separators."
+    output_path = os.path.join(MEDIA_DIR, output_file)
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+
+    input_pattern_full = os.path.join(MEDIA_DIR, input_pattern)
+
+    cmd = [
+        "ffmpeg",
+        "-framerate", str(frame_rate),
+        "-i", input_pattern_full,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully created video {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error creating video: {e.stderr.decode()}"
+
+# Tool: Convert video to image sequence
+@mcp.tool()
+def video_to_images(input_file: str, output_pattern: str, frame_rate: float = None) -> str:
+    """Converts a video into a sequence of images using FFmpeg."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if os.path.sep in output_pattern:
+        return "Error: Output pattern cannot contain directory separators."
+    if not (output_pattern.lower().endswith('.png') or output_pattern.lower().endswith('.jpg')):
+        return "Error: Output pattern must end with .png or .jpg"
+
+    output_pattern_full = os.path.join(MEDIA_DIR, output_pattern)
+
+    cmd = ["ffmpeg", "-i", input_path]
+    if frame_rate is not None:
+        if frame_rate <= 0:
+            return "Error: frame_rate must be positive"
+        cmd += ["-vf", f"fps={frame_rate}"]
+    cmd += [output_pattern_full]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully extracted images to {output_pattern}"
+    except subprocess.CalledProcessError as e:
+        return f"Error extracting images: {e.stderr.decode()}"
+
+# Tool: Replace audio track in video
+@mcp.tool()
+def replace_audio_track(input_video: str, input_audio: str, output_file: str) -> str:
+    """Replaces the audio track in a video file with a new audio file."""
+    video_path = os.path.join(MEDIA_DIR, input_video)
+    audio_path = os.path.join(MEDIA_DIR, input_audio)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+
+    if not os.path.exists(video_path):
+        return f"Error: Video file {input_video} not found."
+    if not os.path.exists(audio_path):
+        return f"Error: Audio file {input_audio} not found."
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-i", audio_path,
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully replaced audio in {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error replacing audio: {e.stderr.decode()}"
+
+# Tool: Overlay image on video (e.g., watermark)
+@mcp.tool()
+def overlay_image(input_video: str, input_image: str, position: str, output_file: str) -> str:
+    """Overlays an image on a video at a specified position."""
+    video_path = os.path.join(MEDIA_DIR, input_video)
+    image_path = os.path.join(MEDIA_DIR, input_image)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+
+    if not os.path.exists(video_path):
+        return f"Error: Video file {input_video} not found."
+    if not os.path.exists(image_path):
+        return f"Error: Image file {input_image} not found."
+    if position not in POSITION_MAP:
+        return f"Error: Invalid position. Must be one of {list(POSITION_MAP.keys())}"
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+
+    overlay_expr = POSITION_MAP[position]
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-i", image_path,
+        "-filter_complex", f"[0:v][1:v]overlay={overlay_expr}[v]",
+        "-map", "[v]",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully overlaid image on {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error overlaying image: {e.stderr.decode()}"
+
+# Tool: Transform video (crop, scale, rotate, flip, transpose)
+@mcp.tool()
+def transform_video(input_file: str, transformation: str, params: Dict[str, Any], output_file: str) -> str:
+    """Applies a transformation (crop, scale, rotate, flip, transpose) to a video."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if transformation not in TRANSFORM_PARAMS:
+        return f"Error: Invalid transformation. Must be one of {list(TRANSFORM_PARAMS.keys())}"
+    required_params = TRANSFORM_PARAMS[transformation]
+    if not all(p in params for p in required_params):
+        return f"Error: Missing parameters for {transformation}. Required: {required_params}"
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+
+    if transformation == "crop":
+        filter_str = "crop={width}:{height}:{x}:{y}".format(**params)
+    elif transformation == "scale":
+        filter_str = "scale={width}:{height}".format(**params)
+    elif transformation == "rotate":
+        filter_str = "rotate={angle}*PI/180".format(**params)
+    elif transformation == "flip":
+        direction = params["direction"]
+        if direction not in ["horizontal", "vertical"]:
+            return "Error: direction must be 'horizontal' or 'vertical'"
+        filter_str = "hflip" if direction == "horizontal" else "vflip"
+    elif transformation == "transpose":
+        dir = params["dir"]
+        if not 0 <= dir <= 3:
+            return "Error: dir must be between 0 and 3"
+        filter_str = "transpose={dir}".format(**params)
+
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-vf", filter_str,
+        "-c:a", "copy",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully transformed video to {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error transforming video: {e.stderr.decode()}"
+
+# Tool: Adjust playback speed (slow motion or time-lapse)
+@mcp.tool()
+def adjust_speed(input_file: str, speed_factor: float, output_file: str) -> str:
+    """Adjusts the playback speed of a video (e.g., slow motion or time-lapse)."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if not 0.5 <= speed_factor <= 100:
+        return "Error: speed_factor must be between 0.5 and 100"
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+
+    video_filter = f"setpts={1/speed_factor}*PTS"
+    audio_filter = f"atempo={speed_factor}"
+
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-filter:v", video_filter,
+        "-filter:a", audio_filter,
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully adjusted speed to {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error adjusting speed: {e.stderr.decode()}"
 
 # Run the server
 if __name__ == "__main__":
