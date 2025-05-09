@@ -28,7 +28,8 @@ TRANSFORM_PARAMS = {
     "scale": ["width", "height"],
     "rotate": ["angle"],
     "flip": ["direction"],
-    "transpose": ["dir"]
+    "transpose": ["dir"],
+    "pad": ["width", "height", "x", "y"]
 }
 
 # Resource to list available media files
@@ -375,9 +376,10 @@ def overlay_image(input_video: str, input_image: str, position: str, output_file
         return f"Error overlaying image: {e.stderr.decode()}"
 
 # Tool: Transform video (crop, scale, rotate, flip, transpose)
+# Updated transform_video tool
 @mcp.tool()
 def transform_video(input_file: str, transformation: str, params: Dict[str, Any], output_file: str) -> str:
-    """Applies a transformation (crop, scale, rotate, flip, transpose) to a video."""
+    """Applies a transformation (crop, scale, rotate, flip, transpose, pad) to a video."""
     input_path = os.path.join(MEDIA_DIR, input_file)
     output_path = os.path.join(MEDIA_DIR, output_file)
 
@@ -409,6 +411,9 @@ def transform_video(input_file: str, transformation: str, params: Dict[str, Any]
         if not 0 <= dir <= 3:
             return "Error: dir must be between 0 and 3"
         filter_str = "transpose={dir}".format(**params)
+    elif transformation == "pad":
+        color = params.get("color", "black")
+        filter_str = "pad={width}:{height}:{x}:{y}:{color}".format(**params)
 
     cmd = [
         "ffmpeg",
@@ -422,38 +427,6 @@ def transform_video(input_file: str, transformation: str, params: Dict[str, Any]
         return f"Successfully transformed video to {output_file}"
     except subprocess.CalledProcessError as e:
         return f"Error transforming video: {e.stderr.decode()}"
-
-# Tool: Adjust playback speed (slow motion or time-lapse)
-@mcp.tool()
-def adjust_speed(input_file: str, speed_factor: float, output_file: str) -> str:
-    """Adjusts the playback speed of a video (e.g., slow motion or time-lapse)."""
-    input_path = os.path.join(MEDIA_DIR, input_file)
-    output_path = os.path.join(MEDIA_DIR, output_file)
-
-    if not os.path.exists(input_path):
-        return f"Error: Input file {input_file} not found."
-    if not 0.5 <= speed_factor <= 100:
-        return "Error: speed_factor must be between 0.5 and 100"
-    if os.path.exists(output_path):
-        return f"Error: Output file {output_file} already exists."
-    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
-        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
-
-    video_filter = f"setpts={1/speed_factor}*PTS"
-    audio_filter = f"atempo={speed_factor}"
-
-    cmd = [
-        "ffmpeg",
-        "-i", input_path,
-        "-filter:v", video_filter,
-        "-filter:a", audio_filter,
-        output_path
-    ]
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return f"Successfully adjusted speed to {output_file}"
-    except subprocess.CalledProcessError as e:
-        return f"Error adjusting speed: {e.stderr.decode()}"
 
 # Run the server
 if __name__ == "__main__":
