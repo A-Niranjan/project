@@ -670,6 +670,100 @@ def apply_overlay(input_file: str, overlay_file: str, position: str, opacity: fl
     except subprocess.CalledProcessError as e:
         return f"Error applying overlay: {e.stderr.decode()}"
 
+
+# Tool to apply a filter template (without overlay)
+@mcp.tool()
+def apply_filter_template(input_file: str, template_name: str, output_file: str) -> str:
+    """Apply a predefined filter template to a video."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+    template_path = os.path.join(MEDIA_DIR, "filters", f"{template_name}.json")
+    
+    # Validation checks
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if not os.path.exists(template_path):
+        return f"Error: Filter template {template_name} not found."
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+    
+    with open(template_path, "r") as f:
+        template = json.load(f)
+    
+    current_file = input_file
+    temp_files = []
+    
+    # Apply curves, eq, and vignette in one step
+    if "curves" in template and "eq" in template and "vignette" in template:
+        curves = template["curves"]
+        eq = template["eq"]
+        vignette = template["vignette"]
+        
+        curves_filter = f"curves=red='{curves['red']}':green='{curves['green']}':blue='{curves['blue']}'"
+        eq_filter = f"eq=contrast={eq['contrast']}:saturation={eq['saturation']}"
+        vignette_filter = f"vignette=angle={vignette['angle']}"
+        filter_str = ",".join([curves_filter, eq_filter, vignette_filter])
+        
+        temp_output = f"temp_{len(temp_files)}.mp4"
+        temp_files.append(temp_output)
+        cmd = [
+            "ffmpeg", "-i", os.path.join(MEDIA_DIR, current_file),
+            "-vf", filter_str, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy",
+            os.path.join(MEDIA_DIR, temp_output)
+        ]
+        subprocess.run(cmd, check=True)
+        current_file = temp_output
+    
+    # Apply fps
+    if "fps" in template:
+        fps = template["fps"]
+        temp_output = f"temp_{len(temp_files)}.mp4"
+        temp_files.append(temp_output)
+        cmd = [
+            "ffmpeg", "-i", os.path.join(MEDIA_DIR, current_file),
+            "-vf", f"fps=fps={fps}", "-c:v", "libx264", "-c:a", "copy",
+            os.path.join(MEDIA_DIR, temp_output)
+        ]
+        subprocess.run(cmd, check=True)
+        current_file = temp_output
+    
+    # Apply noise
+    if "noise" in template:
+        noise = template["noise"]
+        filter_str = f"noise=c0s={noise['strength']}:c0f={noise['flags']}"
+        temp_output = f"temp_{len(temp_files)}.mp4"
+        temp_files.append(temp_output)
+        cmd = [
+            "ffmpeg", "-i", os.path.join(MEDIA_DIR, current_file),
+            "-vf", filter_str, "-c:v", "libx264", "-c:a", "copy",
+            os.path.join(MEDIA_DIR, temp_output)
+        ]
+        subprocess.run(cmd, check=True)
+        current_file = temp_output
+    
+    # Rename the final temp file to the output file
+    os.rename(os.path.join(MEDIA_DIR, current_file), output_path)
+    
+    # Clean up temporary files
+    for temp_file in temp_files:
+        if os.path.exists(os.path.join(MEDIA_DIR, temp_file)):
+            os.remove(os.path.join(MEDIA_DIR, temp_file))
+    
+    return f"Successfully applied {template_name} filter to {output_file}"
+
+# Tool to list available filters
+@mcp.tool()
+def list_filter_templates() -> str:
+    """List available filter templates."""
+    filters_dir = os.path.join(MEDIA_DIR, "filters")
+    if not os.path.exists(filters_dir):
+        return "No filter templates found."
+    
+    templates = [f.split(".")[0] for f in os.listdir(filters_dir) if f.endswith(".json")]
+    return json.dumps(templates)
+
 # Run the server
 if __name__ == "__main__":
     mcp.run()
