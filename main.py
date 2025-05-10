@@ -83,6 +83,100 @@ def get_audio_codec(file_path: str) -> str:
     except subprocess.CalledProcessError:
         return "error"
 
+    
+# Helper function to get video duration for fade tool
+def get_video_duration(file_path: str) -> float:
+    """Returns the duration of a video file in seconds using ffprobe."""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, text=True)
+        return float(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError):
+        return 0.0
+
+# Splitting Tool
+@mcp.tool()
+def split_video(input_file: str, segment_duration: float, output_pattern: str) -> str:
+    """Splits a video into segments of specified duration using FFmpeg."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if segment_duration <= 0:
+        return "Error: segment_duration must be positive."
+    if os.path.sep in output_pattern:
+        return "Error: Output pattern cannot contain directory separators."
+    
+    output_pattern_full = os.path.join(MEDIA_DIR, output_pattern)
+    
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-f", "segment",
+        "-segment_time", str(segment_duration),
+        "-c", "copy",
+        output_pattern_full
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully split video into segments using pattern {output_pattern}"
+    except subprocess.CalledProcessError as e:
+        return f"Error splitting video: {e.stderr.decode()}"
+
+# Fade Tool
+@mcp.tool()
+def fade_video(input_file: str, fade_in_duration: float, fade_out_duration: float, output_file: str) -> str:
+    """Applies fade-in and/or fade-out effects to video and audio using FFmpeg."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+    
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if fade_in_duration < 0 or fade_out_duration < 0:
+        return "Error: Fade durations must be non-negative."
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+    
+    duration = get_video_duration(input_path)
+    if duration == 0.0:
+        return "Error: Could not determine video duration."
+    
+    video_filters = []
+    audio_filters = []
+    
+    if fade_in_duration > 0:
+        video_filters.append(f"fade=t=in:st=0:d={fade_in_duration}")
+        audio_filters.append(f"afade=t=in:st=0:d={fade_in_duration}")
+    
+    if fade_out_duration > 0:
+        fade_out_start = max(duration - fade_out_duration, 0)
+        video_filters.append(f"fade=t=out:st={fade_out_start}:d={fade_out_duration}")
+        audio_filters.append(f"afade=t=out:st={fade_out_start}:d={fade_out_duration}")
+    
+    vf = ",".join(video_filters) if video_filters else None
+    af = ",".join(audio_filters) if audio_filters else None
+    
+    cmd = ["ffmpeg", "-i", input_path]
+    if vf:
+        cmd += ["-vf", vf]
+    if af:
+        cmd += ["-af", af]
+    cmd += ["-c:v", "libx264", "-c:a", "aac", output_path]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully applied fade to {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error applying fade: {e.stderr.decode()}"
+
+
 # Tool to trim video without re-encoding
 @mcp.tool()
 def trim_video(input_file: str, start_time: str, duration: str, output_file: str) -> str:
@@ -427,6 +521,154 @@ def transform_video(input_file: str, transformation: str, params: Dict[str, Any]
         return f"Successfully transformed video to {output_file}"
     except subprocess.CalledProcessError as e:
         return f"Error transforming video: {e.stderr.decode()}"
+
+import math
+
+@mcp.tool()
+def apply_color_curves(input_file: str, red_curve: str, green_curve: str, blue_curve: str, output_file: str) -> str:
+    """Apply advanced color curve adjustments with contrast, saturation, and vignette for a realistic vintage look."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+    
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+    
+    # Define the advanced curves filter
+    curves_filter = f"curves=red='{red_curve}':green='{green_curve}':blue='{blue_curve}'"
+    
+    # Additional filters for realism
+    eq_filter = "eq=contrast=1.2:saturation=0.8"
+    
+    # Compute vignette angle (pi/4 radians ≈ 0.7854)
+    vignette_angle = math.pi / 4
+    vignette_filter = f"vignette=angle={vignette_angle}"
+    
+    # Combine all filters
+    filter_str = ",".join([curves_filter, eq_filter, vignette_filter])
+    
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-vf", filter_str,
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-c:a", "copy",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully applied color curves to {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error applying color curves: {e.stderr.decode()}"
+
+@mcp.tool()
+def set_video_fps(input_file: str, fps: float, output_file: str) -> str:
+    """Set a custom frame rate for a vintage effect."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+    
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if fps <= 0:
+        return "Error: fps must be positive."
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+    
+    filter_str = f"fps=fps={fps}"
+    
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-vf", filter_str,
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully set fps to {fps} in {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error setting fps: {e.stderr.decode()}"
+
+@mcp.tool()
+def add_video_noise(input_file: str, noise_strength: int, noise_flags: str, output_file: str) -> str:
+    """Add noise to a video for a vintage effect."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+    
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if noise_strength < 0:
+        return "Error: noise_strength must be non-negative."
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+    
+    filter_str = f"noise=c0s={noise_strength}:c0f={noise_flags}"
+    
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-vf", filter_str,
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully added noise to {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error adding noise: {e.stderr.decode()}"
+
+@mcp.tool()
+def apply_overlay(input_file: str, overlay_file: str, position: str, opacity: float, output_file: str) -> str:
+    """Apply an overlay video/image with position and opacity for a vintage effect."""
+    input_path = os.path.join(MEDIA_DIR, input_file)
+    overlay_path = os.path.join(MEDIA_DIR, overlay_file)
+    output_path = os.path.join(MEDIA_DIR, output_file)
+    
+    if not os.path.exists(input_path):
+        return f"Error: Input file {input_file} not found."
+    if not os.path.exists(overlay_path):
+        return f"Error: Overlay file {overlay_file} not found."
+    if position not in POSITION_MAP:
+        return f"Error: Invalid position. Must be one of {list(POSITION_MAP.keys())}"
+    if not 0 <= opacity <= 1:
+        return "Error: opacity must be between 0 and 1."
+    if os.path.exists(output_path):
+        return f"Error: Output file {output_file} already exists."
+    if not any(output_file.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return f"Error: Output file must have a video extension ({', '.join(VIDEO_EXTENSIONS)})"
+    
+    overlay_expr = POSITION_MAP[position]
+    filter_complex = (
+        f"[1:v]format=yuva444p,colorchannelmixer=aa={opacity}[overlay];"
+        f"[0:v][overlay]overlay={overlay_expr}[v]"
+    )
+    
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-i", overlay_path,
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return f"Successfully applied overlay to {output_file}"
+    except subprocess.CalledProcessError as e:
+        return f"Error applying overlay: {e.stderr.decode()}"
 
 # Run the server
 if __name__ == "__main__":
